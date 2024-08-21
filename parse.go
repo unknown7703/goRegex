@@ -2,7 +2,6 @@ package goregex
 
 import (
 	"fmt"
-	"go/token"
 	"strconv"
 	"strings"
 )
@@ -223,7 +222,294 @@ func parseGroup(regString string,parCtx *parsingContext) *RegexError{
 		pos: parCtx.loc(),
 		tokens: []rgToken{},
 	}
-	
+	groupName:=""
+	if regString[groupContext.loc()]=='?'{
+		if regString[groupContext.adv()]=='<'{
+			for regString[groupContext.adv()]!='>'{
+				ch:=regString[groupContext.loc()]
+				groupName+=fmt.Sprintf("%c",ch)
+			}
+		}else{
+			return &RegexError{
+				Code: SyntaxError,
+				Message: "group name invalid",
+				Pos: groupContext.loc(),
+			}
+		}
+		groupContext.adv()
+	}
+
+	for groupContext.loc()<len(regString) && regString[groupContext.loc()]!=')'{
+		ch:=regString[groupContext.loc()]
+		if err:=processChar(regString,&groupContext,ch); err!=nil{
+			return err
+		}
+		groupContext.adv()
+	}
+	if regString[groupContext.loc()] != ')' {
+		return &RegexError{
+			Code:    SyntaxError,
+			Message: "Group has not been properly closed",
+			Pos:     groupContext.loc(),
+		}
+	}
+
+	token := rgToken{
+		tokenType: groupCaptured,
+		value: groupPayload{
+			token: groupContext.tokens,
+			name:   groupName,
+		},
+	}
+	parCtx.push(token)
+	parCtx.advTo(groupContext.loc())
+	return nil
+}
+/////////////////////////////////////
+//parse quantifiers
+func parseQuant(ch uint8,parCtx *parsingContext){
+	bound :=quantToCurly[ch]
+	token :=rgToken{
+		tokenType: quantifier,
+		value: quantPayload{
+			min: bound[0],
+			max: bound[1],
+			value: parCtx.remLast(1)[0],
+		},
+	}
+	parCtx.push(token)
+}
+////////////////////////////////////
+//parse quants {}
+func parseBounded(rgString string,parCtx *parsingContext) *RegexError{
+	starPos:=parCtx.adv()
+	endPos:=parCtx.loc()
+	for rgString[endPos]!='}'{
+		endPos++
+	}
+	parCtx.advTo(endPos)
+	rang :=rgString[starPos:endPos]
+	pieces :=strings.Split(rang,",")
+	if len(pieces)==0{
+		return &RegexError{
+			Code: SyntaxError,
+			Message: "Atleast one bound required",
+			Pos: starPos,
+		}
+		
+	}
+	var start int
+	var end int
+	var err error
+	if len(pieces)==1{
+		start,err = strconv.Atoi(pieces[0])
+		if err!=nil{
+			return &RegexError{
+				Code: SyntaxError,
+				Message: err.Error(),
+				Pos: starPos,
+			}
+		}
+		end=start
+	}else if len(pieces)==2{
+		start,err = strconv.Atoi(pieces[0])
+		if err!=nil{
+			return &RegexError{
+				Code: SyntaxError,
+				Message: err.Error(),
+				Pos: starPos,
+			}
+		}
+		if(pieces[1]==""){
+			end = quantInfinity
+		}else{
+			end,err = strconv.Atoi(pieces[1])
+			if err!=nil{
+				return &RegexError{
+					Code: SyntaxError,
+					Message: err.Error(),
+					Pos: starPos,
+				}
+			}
+		}
+	}
+	token :=rgToken{
+		tokenType: quantifier,
+		value: quantPayload{
+			min: start,
+			max: end,
+			value: parCtx.remLast(1)[0],
+		},
+	}
+	parCtx.push(token)
+	return nil
+}
+////////////////////////////////////////////
+//parse backslash
+
+func parseBackslash(regString string,parCtx *parsingContext) * RegexError{
+	nextChar := regString[parCtx.loc()+1]
+	if isDig(nextChar) { // cares about the next single digit
+		token := rgToken{
+			tokenType: backReference,
+			value:     fmt.Sprintf("%c", nextChar),
+		}
+		parCtx.push(token)
+		parCtx.adv()
+	} else if nextChar == 'k' { // \k<name> reference
+		parCtx.adv()
+		if regString[parCtx.adv()] == '<' {
+			groupName := ""
+			for regString[parCtx.adv()] != '>' {
+				nextChar = regString[parCtx.loc()]
+				groupName += fmt.Sprintf("%c", nextChar)
+			}
+			token := rgToken{
+				tokenType: backReference,
+				value:     groupName,
+			}
+			parCtx.push(token)
+			parCtx.adv()
+		} else {
+			return &RegexError{
+				Code:    SyntaxError,
+				Message: "Invalid backreference syntax",
+				Pos:     parCtx.loc(),
+			}
+		}
+	} else if _, canBeEscaped := mustBeEscapedChar[nextChar]; canBeEscaped {
+		token := rgToken{
+			tokenType: literal,
+			value:     nextChar,
+		}
+		parCtx.push(token)
+		parCtx.adv()
+	} else {
+		if nextChar == 'n' {
+			nextChar = '\n'
+		} else if nextChar == 't' {
+			nextChar = '\t'
+		}
+		token := rgToken{
+			tokenType: literal,
+			value:     nextChar,
+		}
+		parCtx.push(token)
+		parCtx.adv()
+	}
+
+	return nil
+}
+/////////////////////////////////////////////
+//parse literal
+func parseLiteral(ch uint8,parCtx *parsingContext){
+	token := rgToken{
+		tokenType: literal,
+		value: ch,
+	}
+	parCtx.push(token)
+}
+/////////////////////////////////////////////
+//parse group uncaptured
+func parseGroupUncaptured(regString string,parCtx *parsingContext)* RegexError{
+	groupCtx := parsingContext{
+		pos: parCtx.loc(),
+		tokens: []rgToken{},
+	}
+	for groupCtx.loc()<len(regString) && regString[groupCtx.loc()]!=')'{
+		ch:=regString[groupCtx.loc()]
+		if err:=processChar(regString,&groupCtx,ch);err!=nil{
+			return err
+		}
+		groupCtx.adv()
+	}
+	token :=rgToken{
+		tokenType: groupUncaptured,
+		value: groupCtx.tokens,
+	}
+	parCtx.push(token)
+
+	if groupCtx.loc() >= len(regString){
+		parCtx.advTo(groupCtx.loc())
+	}else if regString[groupCtx.loc()]==')'{
+		parCtx.advTo(groupCtx.loc()-1)
+	}
+	return nil
+}
+// process all incoming char
+func processChar(regString string,parCtx *parsingContext,ch uint8) *RegexError{
+	if ch=='('{
+		parCtx.adv()
+		if err:=parseGroup(regString,parCtx); err!=nil{
+			return nil
+		}
+	}else if ch=='['{
+		parCtx.adv()
+		if err:=parseBracket(regString,parCtx);err!=nil{
+			return nil
+		}
+	}else if isQuantifier(ch){
+		parseQuant(ch,parCtx)
+	}else if ch=='{'{
+		if err:=parseBounded(regString,parCtx);err!=nil{
+			return nil
+		}
+	}else if ch=='\\'{
+		if err:=parseBackslash(regString,parCtx);err!=nil{
+			return nil
+		}
+	}else if isWild(ch){
+		token:=rgToken{
+			tokenType: wildcard,
+			value: ch,
+		}
+		parCtx.push(token)
+	}else if isLiteral(ch){
+		parseLiteral(ch,parCtx)
+	}else if ch=='|'{
+		//left side of OR
+		left:=rgToken{
+			tokenType: groupUncaptured,
+			value: parCtx.remLast(len(parCtx.tokens)),
+		}
+		//OR itself
+		parCtx.adv()
+		if err:= parseGroupUncaptured(regString,parCtx); err!=nil{
+			return err
+		}
+		//right side of OR
+		right:=parCtx.remLast(1)[0]
+
+		token :=rgToken{
+			tokenType: or,
+			value: []rgToken{left,right},
+		}
+		parCtx.push(token)
+	}else if(ch=='^'){
+		token :=rgToken{
+			tokenType: rgTokenType(textBeginning),
+			value: ch,
+		}
+		parCtx.push(token)
+	}else if(ch=='&'){
+		token :=rgToken{
+			tokenType: rgTokenType(textEnd),
+			value: ch,
+		}
+		parCtx.push(token)
+	}
+	return nil
 }
 
+// parsing the content for finding the regex string
+func parse(regString string, parCtx *parsingContext) *RegexError {
+	for parCtx.loc() < len(regString) {
+		ch := regString[parCtx.loc()]
+		if err := processChar(regString, parCtx, ch); err != nil {
+			return err
+		}
+		parCtx.adv()
+	}
+	return nil
+}
 
